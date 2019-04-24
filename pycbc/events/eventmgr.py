@@ -404,6 +404,8 @@ class EventManager(object):
             f['chisq'] = self.events['chisq']
             f['bank_chisq'] = self.events['bank_chisq']
             f['bank_chisq_dof'] = self.events['bank_chisq_dof']
+            f['ambiguity_chisq'] = self.events['ambiguity_chisq']
+            f['ambiguity_chisq_dof'] = self.events['ambiguity_chisq_dof']
             f['cont_chisq'] = self.events['cont_chisq']
             f['end_time'] = self.events['time_index'] / \
                               float(self.opt.sample_rate) \

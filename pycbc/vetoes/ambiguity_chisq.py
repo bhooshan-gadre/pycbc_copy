@@ -38,7 +38,7 @@ def segment_snrs(filters, stilde, psd, flow, fhigh):
 def simple_inner(htilde, stilde, psd, flow, fhigh):
     kmin, kmax = pf.get_cutoff_indices(flow, fhigh, psd.delta_f, 2*len(psd)+1)
     indices = slice(kmin, kmax)
-    norm = pf.sigma(htilde, psd, flow, fhigh) * pf.sigma(htilde, psd, flow, fhigh)
+    norm = pf.sigma(htilde, psd, flow, fhigh) * pf.sigma(stilde, psd, flow, fhigh)
     return (np.conjugate(htilde.data[indices])*stilde.data[indices]/psd.data[indices]).sum()*4.0*psd.delta_f / norm
 
 def get_cov_gg(filters, psd, flow, fhigh):
@@ -46,7 +46,8 @@ def get_cov_gg(filters, psd, flow, fhigh):
     cov = np.zeros((len_filters, len_filters))
     for i, j in itertools.combinations_with_replacement(range(len_filters), 2):
         cov[i, j] = simple_inner(filters[i], filters[j], psd, flow, fhigh).real
-        cov[j,i] = cov[i, j]
+        cov[j,i] = simple_inner(filters[j], filters[i], psd, flow, fhigh).real
+        # cov[j,i] = cov[i, j]
     return cov
 
 def get_cov_gh(filters, htilde, psd, flow, fhigh):
@@ -83,7 +84,11 @@ def compute_chisq(snrs, snr_ids, seg_snrs, cov_gg, cov_gh, threshold=1e-3):
     chis, dofs = [], []
     for snr, snr_id in zip(snrs, snr_ids):
         cov = get_cov_matrix(snr, cov_gg, cov_gh)
+#         print "cov:"
+#         print cov
         eig, rot_mat = get_eval_rot_mat(cov)
+#         print "eig:"
+#         print eig
         vec = get_vector(snr, snr_id, seg_snrs, cov_gh)
         chi, dof = get_chisq(vec, eig, rot_mat, threshold)
         chis.append(chi)
@@ -115,13 +120,8 @@ def inner(vec1, vec2, psd=None,
 
     return snr
 
-# This class can be made more general by directly accepting bank veto_bank as filters,
-# or filters to be provided externally for each trigger template
-## This will allow to use other filters (eg. Sine-Gaussian, Wavelets) to compute ambiguity_chisq statistic
-### Assumed that filters are compatible with the trigger template (FrequencySeries, same df, same datatype, etc)
-## Caching may need to change accordingly assuming same filters for fixed triggers template
-
 class SingleDetAmbiguityChisq(object):
+    returns = {'ambiguity_chisq': np.float32, 'ambiguity_chisq_dof' : np.int}
     def __init__(self, status, snr_threshold, get_relevant_filters, flow, fmax, time_indices=[0], condition_threshold=1.0e-3):
         if status:
             self.do = True
@@ -166,9 +166,10 @@ class SingleDetAmbiguityChisq(object):
 
     def values(self, snrs, snr_ids, htilde, stilde, psd, snr_threshold=None, condition_threshold=None):
         if self.do:
-            logging.info('Computing ambiguity chi-squares ...')
+            logging.info('Ambiguity chi-squares are on! ...')
 
             thre = snr_threshold if snr_threshold else self.snr_threshold
+            logging.info('Gathering relevant triggers')
             if thre:
                 rel_ids = np.abs(snrs) > thre
             else:
@@ -179,14 +180,23 @@ class SingleDetAmbiguityChisq(object):
             cov_gh = self.cache_template_filter_matches(htilde, psd)
 
             cond_thre = condition_threshold if condition_threshold else self.condition_threshold
+            logging.info('Computing ambiguity chi-squares ...')
             chisq, dof = compute_chisq(snrs[rel_ids], snr_ids[rel_ids], seg_snrs, cov_gg, cov_gh, cond_thre)
-            return chisq, dof
+            # print "chisq, dof"
+            # print chisq, dof
+
+            # re_snr = pf.matched_filter(htilde, stilde, None, self.flow, self.fmax, pf.sigmasq(htilde, psd, self.flow, self.fmax))
+            # # rel_ids = np.where(np.abs(re_snr.data) > thre)[0]
+            # chisq, dof = compute_chisq(re_snr.data[snr_ids[rel_ids]], snr_ids[rel_ids], seg_snrs, cov_gg, cov_gh, cond_thre)
+            # print "chisq, dof: with re_snr"
+            # print chisq, dof
+            return chisq/dof, dof
         else:
             return None, None
 
 
 class filters_for_template(object):
-    def __init__(self, bank, min_filters=10, max_filters=50, nudge=0.2):
+    def __init__(self, bank, min_filters=10, max_filters=20, nudge=0.2):
         self.bank = bank
         bank_tau0, bank_tau3 = pnu.mass1_mass2_to_tau0_tau3(bank.table['mass1'], bank.table['mass2'], bank.table['f_lower'])
         self.bank_tau = bank_tau0 - bank_tau3
@@ -196,6 +206,7 @@ class filters_for_template(object):
         self._cache_relevant_filters = {}
 
     def get_relevant_filters(self, htilde, tau0=None, tau3=None, delta_region=0.005):
+        logging.info("Getting relevant templates")
         key = id(htilde)
         if key not in self._cache_relevant_filters:
             try:
@@ -204,7 +215,7 @@ class filters_for_template(object):
             except:
                 tau = tau0 - tau3
 
-            err = 1e-4
+            err = 1e-3
             idx = (np.abs(self.bank_tau - tau) <= delta_region) * (np.abs(self.bank_tau - tau) > err)
             while (idx.sum() > self.max_filters) + (idx.sum() < self.min_filters):
                 if idx.sum() > self.max_filters:
@@ -214,9 +225,10 @@ class filters_for_template(object):
                     delta_region *= (1.0 + self.nudge)
                     idx = (np.abs(self.bank_tau - tau) <= delta_region) * (np.abs(self.bank_tau - tau) > err)
 
-            filter_list = copy.copy(bank)
+            filter_list = copy.copy(self.bank)
             filter_list.table = filter_list.table[idx]
             self._cache_relevant_filters[key] = filter_list # list of filters to be used in chisq
+        logging.info("Getting relevant templates... Done!")
         return self._cache_relevant_filters[key]
 
     def clear_filters(self, htilde):
