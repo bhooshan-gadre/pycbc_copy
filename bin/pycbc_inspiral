@@ -186,6 +186,9 @@ pycbc.weave.insert_weave_option_group(parser)
 pycbc.inject.insert_injfilterrejector_option_group(parser)
 SingleDetSGChisq.insert_option_group(parser)
 opt = parser.parse_args()
+print "opts:"
+print opt
+print "opts:"
 
 # Check that the values returned for the options make sense
 psd.verify_psd_options(opt, parser)
@@ -339,6 +342,8 @@ with ctx:
 
 # Separate bank for ambiguity chisq due to out=template_mem. This gives
 # problems.
+    # print 'opt.ambi_veto_bank_file'
+    # print opt.ambi_veto_bank_file
     ambi_bank = waveform.FilterBank(opt.ambi_veto_bank_file, flen, delta_f,
         low_frequency_cutoff=None if opt.enable_bank_start_frequency else flow,
         dtype=complex64, phase_order=opt.order,
@@ -347,7 +352,10 @@ with ctx:
         enable_compressed_waveforms=True if opt.use_compressed_waveforms else False,
         waveform_decompression_method=
         opt.waveform_decompression_method if opt.use_compressed_waveforms else None)
-    get_filters = vetoes.filters_for_template(ambi_bank)
+    # import copy
+    # ambi_bank = copy.copy(bank)
+
+    get_filters = vetoes.filters_for_template(ambi_bank, 10, 20)
 
     ambiguity_chisq = vetoes.SingleDetAmbiguityChisq(opt.ambi_status,
             opt.chisq_snr_threshold, get_filters.get_relevant_filters, flow, fmax)

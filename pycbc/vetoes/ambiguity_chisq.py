@@ -71,13 +71,21 @@ def get_vector(snr, snr_id, seg_snrs, cov_gh):
         vec[i] = seg_snrs[i][snr_id].real - snr.real*cov_gh[i].real - snr.imag*cov_gh[i].imag
     return vec
 
-def get_chisq(vec, eig, rot_mat, threshold=1e-3):
+def get_chisq(vec, eig, rot_mat, threshold=1e-2):
     ## Variaous conditions to impose sane chisq and DoF
-    # rel_eig = eig/eig[0] > threshold
-    rel_eig = eig > threshold
+    # rel_eig = eig/eig[-1] > threshold
+    rel_eig = eig/eig[-1] > 1.0/15.0
+    # rel_eig = eig > threshold
     dof = rel_eig.sum()
     rot_vec = np.dot(vec, rot_mat)
     chi =(rot_vec[rel_eig]**2.0/eig[rel_eig]).sum()
+
+    if chi / dof > 4:
+        print("eig for chi = {}".format(chi/dof))
+        print(eig[rel_eig])
+        print('min, max, ratio')
+        print(eig[rel_eig][0], eig[rel_eig][-1], eig[rel_eig][-1]/eig[rel_eig][0])
+
     return chi, dof
 
 def compute_chisq(snrs, snr_ids, seg_snrs, cov_gg, cov_gh, threshold=1e-3):
@@ -122,7 +130,7 @@ def inner(vec1, vec2, psd=None,
 
 class SingleDetAmbiguityChisq(object):
     returns = {'ambiguity_chisq': np.float32, 'ambiguity_chisq_dof' : np.int}
-    def __init__(self, status, snr_threshold, get_relevant_filters, flow, fmax, time_indices=[0], condition_threshold=1.0e-3):
+    def __init__(self, status, snr_threshold, get_relevant_filters, flow, fmax, time_indices=[0], condition_threshold=1.0e-2):
         if status:
             self.do = True
 
@@ -182,14 +190,7 @@ class SingleDetAmbiguityChisq(object):
             cond_thre = condition_threshold if condition_threshold else self.condition_threshold
             logging.info('Computing ambiguity chi-squares ...')
             chisq, dof = compute_chisq(snrs[rel_ids], snr_ids[rel_ids], seg_snrs, cov_gg, cov_gh, cond_thre)
-            # print "chisq, dof"
-            # print chisq, dof
 
-            # re_snr = pf.matched_filter(htilde, stilde, None, self.flow, self.fmax, pf.sigmasq(htilde, psd, self.flow, self.fmax))
-            # # rel_ids = np.where(np.abs(re_snr.data) > thre)[0]
-            # chisq, dof = compute_chisq(re_snr.data[snr_ids[rel_ids]], snr_ids[rel_ids], seg_snrs, cov_gg, cov_gh, cond_thre)
-            # print "chisq, dof: with re_snr"
-            # print chisq, dof
             return chisq/dof, dof
         else:
             return None, None
@@ -205,7 +206,7 @@ class filters_for_template(object):
         self.nudge = nudge
         self._cache_relevant_filters = {}
 
-    def get_relevant_filters(self, htilde, tau0=None, tau3=None, delta_region=0.005):
+    def get_relevant_filters(self, htilde, tau0=None, tau3=None, delta_region=1e-3):
         logging.info("Getting relevant templates")
         key = id(htilde)
         if key not in self._cache_relevant_filters:
@@ -215,7 +216,7 @@ class filters_for_template(object):
             except:
                 tau = tau0 - tau3
 
-            err = 1e-3
+            err = 1e-5
             idx = (np.abs(self.bank_tau - tau) <= delta_region) * (np.abs(self.bank_tau - tau) > err)
             while (idx.sum() > self.max_filters) + (idx.sum() < self.min_filters):
                 if idx.sum() > self.max_filters:

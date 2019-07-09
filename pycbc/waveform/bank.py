@@ -239,6 +239,8 @@ class TemplateBank(object):
     def __init__(self, filename, approximant=None, parameters=None,
                  **kwds):
         self.has_compressed_waveforms = False
+        print("filename")
+        print(filename)
         ext = os.path.basename(filename)
         if ext.endswith(('.xml', '.xml.gz', '.xmlgz')):
             self.filehandler = None
