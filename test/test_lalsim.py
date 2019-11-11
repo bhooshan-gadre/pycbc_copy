@@ -27,17 +27,95 @@ These are simple unit tests for lalsimulation
 import sys
 import unittest
 import copy
-
 import numpy
+import optparse
+from utils import simple_exit, _check_scheme_cpu
 
 import lal, lalsimulation
 import pycbc
-from pycbc.filter import match, overlap, sigma, make_frequency_series
+from pycbc.filter import overlap, sigma, make_frequency_series
+from pycbc.filter import match as _match
 from pycbc.waveform import td_approximants, fd_approximants, \
         get_td_waveform, get_fd_waveform, TimeSeries
+import pycbc.types as pt
+import pycbc.waveform as pw
+import pycbc.filter as _filter
 
-import optparse
-from utils import simple_exit, _check_scheme_cpu
+
+## Helper functions to compute match correctly for HM and precessing waveforms.
+## For these cases, hp != i * hc
+def waveform_basis(hp, hc, psd=None, flow=None, ffinal=None):
+    '''Given (hp, hc), the function gives orthonormal basis vectors.
+    From appendix B (eqns B3, B4) of
+    https://journals.aps.org/prd/pdf/10.1103/PhysRevD.95.024010
+    '''
+    hptilde = _filter.make_frequency_series(hp)
+    hctilde = _filter.make_frequency_series(hc)
+    sig1 = _filter.sigma(hp, psd, flow, ffinal)
+    sig2 = _filter.sigma(hc, psd, flow, ffinal)
+
+    proj = simple_inner(hptilde, hctilde, psd, flow, ffinal, sig1, sig2).real
+
+    if isinstance(hp, pt.TimeSeries):
+        hpp = pt.TimeSeries(hp.data/sig1, delta_t=hc.delta_t, epoch=hc._epoch)
+        hper = pt.TimeSeries(hc.data/sig2, delta_t=hc.delta_t, epoch=hc._epoch)
+    elif isinstance(hp, pt.FrequencySeries):
+        hpp = pt.FrequencySeries(hp.data/sig1, delta_f=hc.delta_f, epoch=hc._epoch)
+        hper = pt.FrequencySeries(hc.data/sig2, delta_f=hc.delta_f, epoch=hc._epoch)
+
+    hper.data = (hper.data - proj*hpp.data)/np.sqrt(1-proj*proj)
+    hper.data /= _filter.sigma(hper, psd, flow, ffinal)
+
+    return hpp, hper
+
+def simple_inner(htilde, stilde, psd=None, flow=None, fhigh=None, norm1=None, norm2=None):
+    kmin, kmax = _filter.get_cutoff_indices(flow, fhigh, htilde.delta_f, (len(htilde)-1) * 2)
+    indices = slice(kmin, kmax)
+    if norm1 and norm2:
+        norm = norm1*norm2
+    else:
+        norm1 = _filter.sigma(htilde, psd, flow, fhigh)
+        norm2 = _filter.sigma(stilde, psd, flow, fhigh)
+        norm = norm1*norm2
+
+    if psd:
+        return (np.conjugate(htilde.data[indices])*stilde.data[indices]/psd.data[indices]).sum()*4.0*psd.delta_f / norm
+    else:
+        return (np.conjugate(htilde.data[indices])*stilde.data[indices]).sum()*4.0*htilde.delta_f / norm
+
+def minmax_match_with_basis(basis1, basis2, psd=None, flow=None, fhigh=None, norm1=None, norm2=None):
+    '''Return phases min-max matches from orthonormal bases.
+    From appendix B (eqns B10 - B14) of
+    https://journals.aps.org/prd/pdf/10.1103/PhysRevD.95.024010
+    '''
+    assert len(basis1[0]) == len(basis2[0]), "Length of both basis do not match"
+    match11 = _filter.matched_filter(basis1[0], basis2[0], psd, flow, fhigh, norm1)
+    match12 = _filter.matched_filter(basis1[0], basis2[1], psd, flow, fhigh, norm2)
+    match21 = _filter.matched_filter(basis1[1], basis2[0], psd, flow, fhigh, norm1)
+    match22 = _filter.matched_filter(basis1[1], basis2[1], psd, flow, fhigh, norm2)
+
+    a = match11.real().data*match11.real().data + match21.real().data*match21.real().data
+
+    b = match12.real().data*match12.real().data + match22.real().data*match22.real().data
+
+    c = match11.real().data*match12.real().data + match21.real().data*match22.real().data
+
+    delta = np.sqrt((a - b)*(a - b) + 4*c*c)
+    min_max = np.sqrt((a+b-delta)/2.0)
+    max_max = np.sqrt((a+b+delta)/2.0)
+    return min_max, max_max
+
+def min_max_match(hp1, hc1, hp2, hc2, psd=None, flow=None, fhigh=None):
+    basis1 = waveform_basis(hp1, hc1, psd, flow, fhigh)
+    basis2 = waveform_basis(hp2, hc2, psd, flow, fhigh)
+    min_max, max_max = minmax_match_with_basis(basis1, basis2, psd, flow, fhigh)
+
+    return min_max.abs_max_loc()
+
+def align_match(hp1, hc1, hp2, hc2, psd=None, flow=None, fhigh=None):
+    return _match(hp1, hp2, psd, flow, fhigh)
+
+
 
 parser = optparse.OptionParser()
 parser.add_option('--scheme','-s', action='callback', type = 'choice',
@@ -47,14 +125,18 @@ parser.add_option('--scheme','-s', action='callback', type = 'choice',
 parser.add_option('--device-num','-d', action='store', type = 'int',
                    dest = 'devicenum', default=0,
                    help = optparse.SUPPRESS_HELP)
-
 parser.add_option('--show-plots', action='store_true',
                    help = 'show the plots generated in this test suite')
 parser.add_option('--save-plots', action='store_true',
                    help = 'save the plots generated in this test suite')
-
 parser.add_option('--approximant', type = 'choice', choices = td_approximants() + fd_approximants(),
                   help = "Choices are %s" % str(td_approximants() + fd_approximants()))
+parser.add_option('--prefer_FD', action='store_true', help = "If the approximant has both time and frequency domain implementations, \
+this forces the test to run with the frequency domain version")
+parser.add_option('--precessing', action='store_true',
+                   help = 'Tell wether the approximant is precessing')
+parser.add_option('--higher-modes', action='store_true',
+                   help = 'Tell wether the approximant is precessing')
 
 parser.add_option('--mass1', type = float, default=10, help = "[default: %default]")
 parser.add_option('--mass2', type = float, default=9, help = "[default: %default]")
@@ -78,7 +160,17 @@ parser.add_option('--amplitude-order', type = int, default=-1, help = "[default:
 parser.add_option('--spin-order', type = int, default=-1, help = "[default: %default]")
 parser.add_option('--tidal-order', type = int, default=-1, help = "[default: %default]")
 
+
 (opt, args) = parser.parse_args()
+
+if opt.approximant not in td_approximants():
+    # If the approximant is only in the frequency domain then set this flag to skip inappropriate tests
+    opt.prefer_FD = True
+
+if opt.precessing or opt.higher_modes:
+    match = min_max_match
+else:
+    match = align_match
 
 print(72*'=')
 print("Running {0} unit tests for {1}:".format('CPU', "Lalsimulation Waveforms"))
@@ -96,7 +188,7 @@ def get_waveform(p, **kwds):
     params = copy.copy(p.__dict__)
     params.update(kwds)
 
-    if params['approximant'] in td_approximants():
+    if params['approximant'] in td_approximants() and not opt.prefer_FD:
         return get_td_waveform(**params)
     else:
         return get_fd_waveform(**params)
@@ -105,6 +197,7 @@ class TestLALSimulation(unittest.TestCase):
     def setUp(self,*args):
         self.save_plots = opt.save_plots
         self.show_plots = opt.show_plots
+        self.prefer_FD = opt.prefer_FD
         self.plot_dir = "."
 
         class params(object):
@@ -117,6 +210,8 @@ class TestLALSimulation(unittest.TestCase):
 
         if 'approximant' in self.kwds:
             self.p.approximant = self.kwds['approximant']
+        if self.p.approximant not in td_approximants():
+            opt.prefer_FD=True
 
         from pycbc import version
         self.version_txt = "pycbc: %s  %s\n" % (version.git_hash, version.date) + \
@@ -127,7 +222,7 @@ class TestLALSimulation(unittest.TestCase):
         #"""Check that the waveform is consistent under phase changes
         #"""
 
-        if self.p.approximant in td_approximants():
+        if self.p.approximant in td_approximants() and not self.prefer_FD:
             sample_attr = 'sample_times'
         else:
             sample_attr = 'sample_frequencies'
@@ -138,20 +233,20 @@ class TestLALSimulation(unittest.TestCase):
         pylab.plot(getattr(hp_ref, sample_attr), hp_ref.real(), label="phiref")
 
         hp, hc = get_waveform(self.p, coa_phase=lal.PI/4)
-        m, i = match(hp_ref, hp)
+        m, i = match(hp_ref, hc_ref, hp, hc)
         self.assertAlmostEqual(1, m, places=2)
         o = overlap(hp_ref, hp)
         pylab.plot(getattr(hp, sample_attr), hp.real(), label="$phiref \pi/4$")
 
         hp, hc = get_waveform(self.p, coa_phase=lal.PI/2)
-        m, i = match(hp_ref, hp)
+        m, i = match(hp_ref, hc_ref, hp, hc)
         o = overlap(hp_ref, hp)
         self.assertAlmostEqual(1, m, places=7)
         self.assertAlmostEqual(-1, o, places=7)
         pylab.plot(getattr(hp, sample_attr), hp.real(), label="$phiref \pi/2$")
 
         hp, hc = get_waveform(self.p, coa_phase=lal.PI)
-        m, i = match(hp_ref, hp)
+        m, i = match(hp_ref, hc_ref, hp, hc)
         o = overlap(hp_ref, hp)
         self.assertAlmostEqual(1, m, places=7)
         self.assertAlmostEqual(1, o, places=7)
@@ -271,6 +366,7 @@ class TestLALSimulation(unittest.TestCase):
             nearby_params.mass2 = nearby_params.mass1 * \
                 uniform(low=1-tol, high=1+tol)
             nearby_params.mass1 *= uniform(low=1-tol, high=1+tol)
+            nearby_params.mass1 = max(nearby_params.mass1, nearby_params.mass2)
             nearby_params.spin1x *= uniform(low=1-tol, high=1+tol)
             nearby_params.spin1y *= uniform(low=1-tol, high=1+tol)
             nearby_params.spin1z *= uniform(low=1-tol, high=1+tol)
@@ -322,20 +418,23 @@ class TestLALSimulation(unittest.TestCase):
         self.assertAlmostEqual(max(sigmas), sigmas[0], places=7)
         self.assertTrue(sigmas[0] > sigmas[5])
 
+    @unittest.skip("It is required that mass1>=mass2")
     def test_swapping_constituents(self):
         #""" Test that waveform remains unchanged under swapping both objects
+        # Spins needs to be projected correctly in XY plane.
         #"""
 
         hp, hc = get_waveform(self.p)
         hpswap, hcswap = get_waveform(self.p, mass1=self.p.mass2, mass2=self.p.mass1,
-                spin1x=self.p.spin2x, spin1y=self.p.spin2y, spin1z=self.p.spin2z,
-                spin2x=self.p.spin1x, spin2y=self.p.spin1y, spin2z=self.p.spin1z,
-                lambda1=self.p.lambda2, lambda2=self.p.lambda1)
+                spin1x=-self.p.spin2x, spin1y=-self.p.spin2y, spin1z=self.p.spin2z,
+                spin2x=-self.p.spin1x, spin2y=-self.p.spin1y, spin2z=self.p.spin1z,
+                lambda1=self.p.lambda2, lambda2=self.p.lambda1, coa_phase=self.p.coa_phase + lal.PI)
         op = overlap(hp, hpswap)
         self.assertAlmostEqual(1, op, places=7)
         oc = overlap(hc, hcswap)
         self.assertAlmostEqual(1, oc, places=7)
 
+    @unittest.skipIf(opt.prefer_FD,"Skipping test_change_rate because this is a frequency-domain approximant")
     def test_change_rate(self):
         #""" Test that waveform remains unchanged under changing rate
         #"""
@@ -426,3 +525,4 @@ for apx in apxs:
 if __name__ == '__main__':
     results = unittest.TextTestRunner(verbosity=2).run(suite)
     simple_exit(results)
+
