@@ -185,6 +185,9 @@ parser.add_argument("--use-compressed-waveforms", action="store_true", default=F
                     help='Use compressed waveforms from the bank file.')
 parser.add_argument("--waveform-decompression-method", action='store', default=None,
                     help='Method to be used decompress waveforms from the bank file.')
++## FIXME: Need to create option group for ambiguity chisq veto
++parser.add_argument("--ambi-status", action="store_true", default=True)
++parser.add_argument("--ambi-veto-bank-file", type=str, help="bank file for ambiguity chisq")
 
 # Add options groups
 psd.insert_psd_option_group(parser)
@@ -233,6 +236,7 @@ with ctx:
         fft.fftw.import_double_wisdom_from_filename(opt.fftw_input_double_wisdom_file)
 
     flow = opt.low_frequency_cutoff
+    fmax = opt.sample_rate/2.
     flen = strain_segments.freq_len
     tlen = strain_segments.time_len
     delta_f = strain_segments.delta_f
@@ -249,6 +253,8 @@ with ctx:
         'snr'            : complex64,
         'chisq'          : float32,
         'chisq_dof'      : int,
+        'ambiguity_chisq'     : float32,
+        'ambiguity_chisq_dof' : int,
         'bank_chisq'     : float32,
         'bank_chisq_dof' : int,
         'cont_chisq'     : float32,
@@ -271,7 +277,7 @@ with ctx:
     if opt.psdvar_segment is not None:
         logging.info("Calculating PSD variation")
         psd_var = pycbc.psd.calc_filt_psd_variation(gwstrain, opt.psdvar_segment,
-                opt.psdvar_short_segment, opt.psdvar_long_segment, 
+                opt.psdvar_short_segment, opt.psdvar_long_segment,
                 opt.psdvar_psd_duration, opt.psdvar_psd_stride,
                 opt.psd_estimation, opt.psdvar_low_freq, opt.psdvar_high_freq)
 
@@ -324,6 +330,23 @@ with ctx:
                                  reverse_template=opt.autochi_reverse_template,
                                  take_maximum_value=opt.autochi_max_valued,
                                  maximal_value_dof=opt.autochi_max_valued_dof)
+
+# Separate bank for ambiguity chisq due to out=template_mem. This gives
+# problems.
+    ambi_bank = waveform.FilterBank(opt.ambi_veto_bank_file, flen, delta_f,
+        low_frequency_cutoff=None if opt.enable_bank_start_frequency else flow,
+        dtype=complex64, phase_order=opt.order,
+        taper=opt.taper_template, approximant=opt.approximant,
+        max_template_length=opt.max_template_length,
+        enable_compressed_waveforms=True if opt.use_compressed_waveforms else False,
+        waveform_decompression_method=
+        opt.waveform_decompression_method if opt.use_compressed_waveforms else None)
+
+    get_filters = vetoes.filters_for_template(ambi_bank, 10, 20)
+
+    ambiguity_chisq = vetoes.SingleDetAmbiguityChisq(opt.ambi_status,
+            opt.chisq_snr_threshold, get_filters.get_relevant_filters, flow, fmax)
+
 
     logging.info("Overwhitening frequency-domain data segments")
     for seg in segments:
@@ -411,6 +434,10 @@ with ctx:
                   autochisq.values(snr, idx+stilde.analyze.start, template,
                                    stilde.psd, norm, stilde=stilde,
                                    low_frequency_cutoff=flow)
+
+            out_vals['ambiguity_chisq'], out_vals['ambiguity_chisq_dof'] = \
+                    ambiguity_chisq.values(snrv * norm, idx+stilde.analyze.start,
+                            template, stilde, stilde.psd)
 
             idx += stilde.cumulative_index
 
