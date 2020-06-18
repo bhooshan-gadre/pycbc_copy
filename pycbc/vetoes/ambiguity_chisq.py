@@ -74,7 +74,7 @@ def get_vector(snr, snr_id, seg_snrs, cov_gh):
 def get_chisq(vec, eig, rot_mat, threshold=1e-2):
     ## Variaous conditions to impose sane chisq and DoF
     # rel_eig = eig/eig[-1] > threshold
-    rel_eig = eig/eig[-1] > 1.0/15.0
+    rel_eig = eig/eig[-1] > 1.0/100.0
     # rel_eig = eig > threshold
     dof = rel_eig.sum()
     rot_vec = np.dot(vec, rot_mat)
@@ -206,7 +206,7 @@ class filters_for_template(object):
         self.nudge = nudge
         self._cache_relevant_filters = {}
 
-    def get_relevant_filters(self, htilde, tau0=None, tau3=None, delta_region=1e-3):
+    def get_relevant_filters(self, htilde, tau0=None, tau3=None, delta_region=1e-1):
         logging.info("Getting relevant templates")
         key = id(htilde)
         if key not in self._cache_relevant_filters:

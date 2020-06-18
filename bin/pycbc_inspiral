@@ -185,9 +185,9 @@ parser.add_argument("--use-compressed-waveforms", action="store_true", default=F
                     help='Use compressed waveforms from the bank file.')
 parser.add_argument("--waveform-decompression-method", action='store', default=None,
                     help='Method to be used decompress waveforms from the bank file.')
-+## FIXME: Need to create option group for ambiguity chisq veto
-+parser.add_argument("--ambi-status", action="store_true", default=True)
-+parser.add_argument("--ambi-veto-bank-file", type=str, help="bank file for ambiguity chisq")
+## FIXME: Need to create option group for ambiguity chisq veto
+parser.add_argument("--ambi-status", action="store_true", default=True)
+parser.add_argument("--ambi-veto-bank-file", type=str, help="bank file for ambiguity chisq")
 
 # Add options groups
 psd.insert_psd_option_group(parser)

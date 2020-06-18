@@ -474,6 +474,10 @@ class EventManager(object):
             if 'sg_chisq' in self.events.dtype.names:
                 f['sg_chisq'] = self.events['sg_chisq']
 
+            if 'ambiguity_chisq' in self.events.dtype.names:
+                f['ambiguity_chisq'] = self.events['ambiguity_chisq']
+                f['ambiguity_chisq_dof'] = self.events['ambiguity_chisq_dof']
+
             if self.opt.psdvar_segment is not None:
                 f['psd_var_val'] = self.events['psd_var_val']
 
