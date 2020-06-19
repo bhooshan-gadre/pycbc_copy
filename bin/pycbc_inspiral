@@ -185,9 +185,6 @@ parser.add_argument("--use-compressed-waveforms", action="store_true", default=F
                     help='Use compressed waveforms from the bank file.')
 parser.add_argument("--waveform-decompression-method", action='store', default=None,
                     help='Method to be used decompress waveforms from the bank file.')
-## FIXME: Need to create option group for ambiguity chisq veto
-parser.add_argument("--ambi-status", action="store_true", default=True)
-parser.add_argument("--ambi-veto-bank-file", type=str, help="bank file for ambiguity chisq")
 
 # Add options groups
 psd.insert_psd_option_group(parser)
@@ -198,6 +195,7 @@ fft.insert_fft_option_group(parser)
 pycbc.opt.insert_optimization_option_group(parser)
 pycbc.inject.insert_injfilterrejector_option_group(parser)
 SingleDetSGChisq.insert_option_group(parser)
+vetoes.SingleDetAmbiguityChisq.insert_option_group(parser)
 opt = parser.parse_args()
 
 # Check that the values returned for the options make sense
@@ -253,14 +251,15 @@ with ctx:
         'snr'            : complex64,
         'chisq'          : float32,
         'chisq_dof'      : int,
-        'ambiguity_chisq'     : float32,
-        'ambiguity_chisq_dof' : int,
+        # 'ambiguity_chisq'     : float32,
+        # 'ambiguity_chisq_dof' : int,
         'bank_chisq'     : float32,
         'bank_chisq_dof' : int,
         'cont_chisq'     : float32,
         'psd_var_val'    : float32,
                 }
     out_types.update(SingleDetSGChisq.returns)
+    out_types.update(vetoes.SingleDetAmbiguityChisq.returns)
     out_vals = {key: None for key in out_types}
     names = sorted(out_vals.keys())
 
@@ -342,10 +341,7 @@ with ctx:
         waveform_decompression_method=
         opt.waveform_decompression_method if opt.use_compressed_waveforms else None)
 
-    get_filters = vetoes.filters_for_template(ambi_bank, 10, 20)
-
-    ambiguity_chisq = vetoes.SingleDetAmbiguityChisq(opt.ambi_status,
-            opt.chisq_snr_threshold, get_filters.get_relevant_filters, flow, fmax)
+    ambiguity_chisq = vetoes.SingleDetAmbiguityChisq.from_cli(opt, ambi_bank)
 
 
     logging.info("Overwhitening frequency-domain data segments")
