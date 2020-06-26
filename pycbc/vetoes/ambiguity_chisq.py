@@ -82,9 +82,9 @@ def get_chisq(vec, eig, rot_mat, threshold=1e-2):
     chi =(rot_vec[rel_eig]**2.0/eig[rel_eig]).sum()
 
     if chi / dof > 4:
-        print("eig for chi = {}".format(chi/dof))
+        # print("eig for chi = {}".format(chi/dof))
         print(eig[rel_eig])
-        print('min, max, ratio')
+        # print('min, max, ratio')
         print(eig[rel_eig][0], eig[rel_eig][-1], eig[rel_eig][-1]/eig[rel_eig][0])
 
     return chi, dof
@@ -131,7 +131,7 @@ def inner(vec1, vec2, psd=None,
 
 class SingleDetAmbiguityChisq(object):
     returns = {'ambiguity_chisq': np.float32, 'ambiguity_chisq_dof' : np.int}
-    def __init__(self, status, bank, snr_threshold, flow, fmax, min_filters, max_filters, time_indices=[0], condition_threshold=1.0e-2):
+    def __init__(self, status, bank, snr_threshold, flow, fmax, mc_bound, eta_bound, chie_bound, min_filters, max_filters, time_indices=[0], condition_threshold=1.0e-2, per_template=False):
         if status:
             self.do = True
 
@@ -144,9 +144,14 @@ class SingleDetAmbiguityChisq(object):
             self.flow = flow
             self.fmax = fmax
             self.bank = bank
-            # self.choose_filters = filters_for_template(self.bank, min_filters, max_filters)
-            self.choose_filters = FilterRegions(self.bank, min_filters=min_filters, max_filters=max_filters)
-            self.get_filters = self.choose_filters.get_relevant_filters
+            if per_template:
+                # self.choose_filters = filters_for_template(self.bank, min_filters, max_filters)
+                self.choose_filters = FiltersForTemplate(self.bank, mc_bound=mc_bound, eta_bound=eta_bound, chie_bound=chie_bound ,min_filters=min_filters, max_filters=max_filters)
+                self.get_filters = self.choose_filters.get_relevant_filters
+            else:
+                self.choose_filters = FiltersRegions(self.bank, mc_bound=mc_bound, eta_bound=eta_bound, chie_bound=chie_bound ,min_filters=min_filters, max_filters=max_filters)
+                self.get_filters = self.choose_filters.get_relevant_filters
+
             self.time_idices = np.array(time_indices) # Currently only trigger time = 0 indices are supported
             self._cache_seg_snrs = {} # seg_snrs
             self._cache_filter_matches = {} # (g, g') matches between filters # Can be time series in future due to 'time_indices'
@@ -158,24 +163,37 @@ class SingleDetAmbiguityChisq(object):
     @staticmethod
     def insert_option_group(parser):
         group = parser.add_argument_group("ambiguity chi-square")
+        group.add_argument("--ambi-status", action="store_true", default=True)
         group.add_argument("--ambi-snr-threshold", type=float,
             help="Minimum SNR threshold to use SG chisq")
-        ## FIXME: Need to create option group for ambiguity chisq veto
-        group.add_argument("--ambi-status", action="store_true", default=True)
         group.add_argument("--ambi-veto-bank-file", type=str, help="bank file for ambiguity chisq")
         group.add_argument("--ambi-min-filters", type=int, default=10,
                 help="maximum filters to be used for ambiguity chisq from the veto bank")
         group.add_argument("--ambi-max-filters", type=int, default=30,
                 help="maximum filters to be used for ambiguity chisq from the veto bank")
+        group.add_argument('--ambi-mc-bins', nargs='*', type=float, help="chirp mass bin boundaries")
+        group.add_argument('--ambi-eta-bins', nargs='*', type=float, help="symmetric mass ratio bin boundaries: eta range [0.25, 0)")
+        group.add_argument('--ambi-chi-eff-bins', nargs='*', type=float, help="chi eff bin boundaries: chi eff range (-1, 1)")
+        group.add_argument("--ambi-per-template", action="store_true", default=False)
 
     @classmethod
     def from_cli(cls, args, bank):
         flow = args.low_frequency_cutoff
         fmax = args.sample_rate/2.
-        return cls(args.ambi_status, bank, args.ambi_snr_threshold, flow, fmax, args.ambi_min_filters, args.ambi_max_filters)
+        mc_bound = args.ambi_mc_bins if args.ambi_mc_bins else []
+        eta_bound = args.ambi_eta_bins if args.ambi_eta_bins else [1e-4, 0.25]
+        chie_bound = args.ambi_chi_eff_bins if args.ambi_chi_eff_bins else [-1, 1]
+        mc_bound.sort()
+        eta_bound.sort()
+        chie_bound.sort()
+        return cls(args.ambi_status, bank, args.ambi_snr_threshold, flow, fmax, mc_bound, eta_bound, chie_bound, args.ambi_min_filters, args.ambi_max_filters, per_template=args.ambi_per_template)
 
     def cache_seg_snrs(self, htilde, stilde, psd):  # It is assumed ``filters iff htilde''
-        key = (id(htilde), id(stilde), id(psd)) # key is always: template, data segment, psd
+        # key = (id(htilde), id(stilde), id(psd))
+        key = (id(htilde), stilde.end_time, id(psd))
+        print("key = (id(htilde), stilde.end_time, psd.end_time)")
+        print(key)
+        print("Above is the key")
         if key not in self._cache_seg_snrs:
             filters = self.get_filters(htilde)
             self._cache_seg_snrs[key] = segment_snrs(filters, stilde, psd, self.flow, self.fmax)  ## Assumed data is overwhitened
@@ -191,6 +209,7 @@ class SingleDetAmbiguityChisq(object):
         return self._cache_filter_matches[key]
 
     def cache_template_filter_matches(self, htilde, psd):
+        # key = (id(htilde), id(psd))
         key = (id(htilde), id(psd))
         if key not in self._cache_template_filter_matches:
             filters = self.get_filters(htilde)
@@ -225,9 +244,11 @@ class SingleDetAmbiguityChisq(object):
         else:
             return None, None
 
-class FilterRegions(object):
+
+class FiltersRegions(object):
     def __init__(self, bank, mc_bound=[], eta_bound=[1e-4, 0.25], chie_bound=[-1, 1], min_filters=10, max_filters=20):
 
+        logging.info("Using for bins")
         if ('mchirp' not in bank.table.fieldnames) or  ('eta' not in bank.table.fieldnames):
             mchirp, eta = pnu.mass1_mass2_to_mchirp_eta(bank.table['mass1'], bank.table['mass2'])
             if 'mchirp' not in bank.table.fieldnames:
@@ -241,7 +262,7 @@ class FilterRegions(object):
         self.bank = bank
         self.min_filters = min_filters
         self.max_filters = max_filters
-        self.ranges = {'mchirp': mc_bound if mc_bound else np.array([bank.table['mchirp'].min(),bank.table['mchirp'].max()]),
+        self.ranges = {'mchirp': mc_bound if mc_bound else np.array([bank.table['mchirp'].min()*0.95,bank.table['mchirp'].max()*1.05]),
                 'eta': np.array(eta_bound), 'chi_eff': np.array(chie_bound)} ## make sure to have min and max of the mf banks covered
         self._cache_relevant_filters = {}
 
@@ -250,23 +271,24 @@ class FilterRegions(object):
             chie = chi_eff(htilde.params.mass1, htilde.params.mass2, htilde.params.spin1z, htilde.params.spin2z)
             h_params = {'mchirp': mchirp, 'eta': eta, 'chi_eff': chie}
 
-            idx = np.abs(self.bank.table['mchirp'] - h_params['mchirp']) > 1e-4 # Just to make sure we are not having the trigger template
+            idx = np.abs(self.bank.table['mchirp'] - h_params['mchirp']) > 1e-5 # Just to make sure we are not having the trigger template
+            logging.info("not me left over are {}".format(idx.sum()))
             for k, v in self.ranges.items():
                 bin = np.searchsorted(v, h_params[k])
                 if bin < 1 or bin >= len(v): # If out of boundaries given, we are not calculating anything
                     idx *= np.zeros_like(idx)
+                    logging.info("after {}, out of the bound: left over are {}".format(k, idx.sum()))
+                    logging.info("bins are {} and template is {} ".format(v, h_params[k]))
+                    break
                 else:
                     idx = idx * (self.bank.table[k] > v[bin-1]) * (self.bank.table[k] < v[bin])
+                    logging.info("after {} left over are {}".format(k, idx.sum()))
+                    logging.info("bins are {} and template is {} ".format(v, h_params[k]))
 
-            ## FIXME here and remove from get_relevant_filters
-            # if idx.sum() > self.max_filters:
-            #     idx[idx][np.logical_not(np.argsort(np.abs(self.bank.table['mchirp'][idx] - h_params['mchirp']))[:self.max_filters])] = False
-            #     return idx[idx][numpy.logical_not(np.argsort(np.abs(self.bank.table['mchirp'][idx] - h_params['mchirp']))[:self.max_filters])] = False
             return idx
 
     def get_relevant_filters(self, htilde):
         logging.info("Getting relevant templates")
-        # key = htilde.params.template_hash
         key = id(htilde)
         if key not in self._cache_relevant_filters:
             idx = self.idx_from_ranges(htilde)
@@ -277,7 +299,7 @@ class FilterRegions(object):
                 chie = chi_eff(htilde.params.mass1, htilde.params.mass2, htilde.params.spin1z, htilde.params.spin2z)
                 h_params = {'mchirp': mchirp, 'eta': eta, 'chi_eff': chie}
                 filter_list.table = filter_list.table[np.argsort(np.abs(filter_list.table['mchirp'] - h_params['mchirp']))[:self.max_filters]]
-            self._cache_relevant_filters[key] = filter_list # list of filters to be used in chisq
+            self._cache_relevant_filters[key] = list(filter_list) # list of filters to be used in chisq
         logging.info("Getting relevant templates... Done!")
         return self._cache_relevant_filters[key]
 
@@ -287,40 +309,55 @@ class FilterRegions(object):
             del self._cache_relevant_filters[key]
 
 
+class FiltersForTemplate(object):
+    def __init__(self, bank, mc_bound=[], eta_bound=[1e-4, 0.25], chie_bound=[-1, 1], min_filters=10, max_filters=20):
 
-class filters_for_template(object):
-    def __init__(self, bank, min_filters=10, max_filters=20, nudge=0.2):
+        logging.info("Using for template")
+        if ('mchirp' not in bank.table.fieldnames) or  ('eta' not in bank.table.fieldnames):
+            mchirp, eta = pnu.mass1_mass2_to_mchirp_eta(bank.table['mass1'], bank.table['mass2'])
+            if 'mchirp' not in bank.table.fieldnames:
+                bank.table.add_fields(mchirp, 'mchirp')
+            if 'eta' not in bank.table.fieldnames:
+                bank.table.add_fields(eta, 'eta')
+        if 'chi_eff' not in bank.table.fieldnames:
+            chie = chi_eff(bank.table['mass1'], bank.table['mass2'], bank.table['spin1z'], bank.table['spin2z'])
+            bank.table.add_fields(chie, 'chi_eff')
+
         self.bank = bank
-        bank_tau0, bank_tau3 = pnu.mass1_mass2_to_tau0_tau3(bank.table['mass1'], bank.table['mass2'], bank.table['f_lower'])
-        self.bank_tau = bank_tau0 - bank_tau3
         self.min_filters = min_filters
         self.max_filters = max_filters
-        self.nudge = nudge
+        self.ranges = {'mchirp': mc_bound if mc_bound else np.array([bank.table['mchirp'].min()*0.95,bank.table['mchirp'].max()*1.05]),
+                'eta': np.array(eta_bound), 'chi_eff': np.array(chie_bound)} ## make sure to have min and max of the mf banks covered
         self._cache_relevant_filters = {}
 
-    def get_relevant_filters(self, htilde, tau0=None, tau3=None, delta_region=1e-1):
+    def idx_from_ranges(self,  htilde):
+            mchirp, eta = pnu.mass1_mass2_to_mchirp_eta(htilde.params.mass1, htilde.params.mass2)
+            chie = chi_eff(htilde.params.mass1, htilde.params.mass2, htilde.params.spin1z, htilde.params.spin2z)
+            h_params = {'mchirp': mchirp, 'eta': eta, 'chi_eff': chie}
+
+            idx = np.abs(self.bank.table['mchirp'] - h_params['mchirp']) > 1e-5 # Just to make sure we are not having the trigger template
+            for k, v in self.ranges.items():
+                bin = np.searchsorted(v, h_params[k])
+                if bin < 1 or bin >= len(v): # If out of boundaries given, we are not calculating anything
+                    idx *= np.zeros_like(idx)
+                else:
+                    idx = idx * (self.bank.table[k] > v[bin-1]) * (self.bank.table[k] < v[bin])
+
+            return idx
+
+    def get_relevant_filters(self, htilde):
         logging.info("Getting relevant templates")
         key = id(htilde)
         if key not in self._cache_relevant_filters:
-            try:
-                trig_tau0, trig_tau3 = pnu.mass1_mass2_to_tau0_tau3(htilde.params.mass1, htilde.params.mass2, htilde.params.f_lower)
-                tau = trig_tau0 - trig_tau3
-            except:
-                tau = tau0 - tau3
-
-            err = 1e-5
-            idx = (np.abs(self.bank_tau - tau) <= delta_region) * (np.abs(self.bank_tau - tau) > err)
-            while (idx.sum() > self.max_filters) + (idx.sum() < self.min_filters):
-                if idx.sum() > self.max_filters:
-                    delta_region *= (1-self.nudge)
-                    idx = (np.abs(self.bank_tau - tau) <= delta_region) * (np.abs(self.bank_tau - tau) > err)
-                elif idx.sum() < self.min_filters:
-                    delta_region *= (1.0 + self.nudge)
-                    idx = (np.abs(self.bank_tau - tau) <= delta_region) * (np.abs(self.bank_tau - tau) > err)
-
+            idx = self.idx_from_ranges(htilde)
             filter_list = copy.copy(self.bank)
             filter_list.table = filter_list.table[idx]
-            self._cache_relevant_filters[key] = filter_list # list of filters to be used in chisq
+            if idx.sum() > self.max_filters:
+                mchirp, eta = pnu.mass1_mass2_to_mchirp_eta(htilde.params.mass1, htilde.params.mass2)
+                chie = chi_eff(htilde.params.mass1, htilde.params.mass2, htilde.params.spin1z, htilde.params.spin2z)
+                h_params = {'mchirp': mchirp, 'eta': eta, 'chi_eff': chie}
+                filter_list.table = filter_list.table[np.argsort(np.abs(filter_list.table['mchirp'] - h_params['mchirp']))[:self.max_filters]]
+            self._cache_relevant_filters[key] = list(filter_list) # list of filters to be used in chisq
         logging.info("Getting relevant templates... Done!")
         return self._cache_relevant_filters[key]
 
@@ -328,3 +365,44 @@ class filters_for_template(object):
         key = id(htilde)
         if key in self._cache_relevant_filters:
             del self._cache_relevant_filters[key]
+
+# class filters_for_template(object):
+#     def __init__(self, bank, min_filters=10, max_filters=20, nudge=0.2):
+#         self.bank = bank
+#         bank_tau0, bank_tau3 = pnu.mass1_mass2_to_tau0_tau3(bank.table['mass1'], bank.table['mass2'], bank.table['f_lower'])
+#         self.bank_tau = bank_tau0 - bank_tau3
+#         self.min_filters = min_filters
+#         self.max_filters = max_filters
+#         self.nudge = nudge
+#         self._cache_relevant_filters = {}
+#
+#     def get_relevant_filters(self, htilde, tau0=None, tau3=None, delta_region=1e-1):
+#         logging.info("Getting relevant templates")
+#         key = id(htilde)
+#         if key not in self._cache_relevant_filters:
+#             try:
+#                 trig_tau0, trig_tau3 = pnu.mass1_mass2_to_tau0_tau3(htilde.params.mass1, htilde.params.mass2, htilde.params.f_lower)
+#                 tau = trig_tau0 - trig_tau3
+#             except:
+#                 tau = tau0 - tau3
+#
+#             err = 1e-5
+#             idx = (np.abs(self.bank_tau - tau) <= delta_region) * (np.abs(self.bank_tau - tau) > err)
+#             while (idx.sum() > self.max_filters) + (idx.sum() < self.min_filters):
+#                 if idx.sum() > self.max_filters:
+#                     delta_region *= (1-self.nudge)
+#                     idx = (np.abs(self.bank_tau - tau) <= delta_region) * (np.abs(self.bank_tau - tau) > err)
+#                 elif idx.sum() < self.min_filters:
+#                     delta_region *= (1.0 + self.nudge)
+#                     idx = (np.abs(self.bank_tau - tau) <= delta_region) * (np.abs(self.bank_tau - tau) > err)
+#
+#             filter_list = copy.copy(self.bank)
+#             filter_list.table = filter_list.table[idx]
+#             self._cache_relevant_filters[key] = filter_list # list of filters to be used in chisq
+#         logging.info("Getting relevant templates... Done!")
+#         return self._cache_relevant_filters[key]
+#
+#     def clear_filters(self, htilde):
+#         key = id(htilde)
+#         if key in self._cache_relevant_filters:
+#             del self._cache_relevant_filters[key]
